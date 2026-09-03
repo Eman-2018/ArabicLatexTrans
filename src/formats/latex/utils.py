@@ -595,9 +595,41 @@ def fix_figure_direction_for_arabic(latex_code):
 
 def add_arabic_package(latex_code):
     if "\\usepackage{polyglossia}" not in latex_code and "\\usepackage{babel}" not in latex_code:
+        # Apply content-level fixes (currently just figure protection) to
+        # the ORIGINAL document first, before inserting our own preamble
+        # below -- so nothing in our own preamble is accidentally matched
+        # by any content-level fix.
+        latex_code = fix_figure_direction_for_arabic(latex_code)
+
         arabic_packages = (
             "\\usepackage{multicol}\n"
             "\\usepackage{fontspec}\n"
+            # titlesec MUST load here, before polyglossia -- polyglossia loads
+            # bidi internally, and bidi requires every other package to load
+            # before it, INCLUDING within our own injected block. Confirmed
+            # by testing on a real compile log: with titlesec placed after
+            # polyglossia, compilation failed outright with "Package bidi
+            # Error: you have loaded package titlesec after bidi package."
+            # ACL's own \section/\subsection formatting typically hard-codes
+            # flush-left alignment (\raggedright) for visual/spacing reasons,
+            # independent of the document's text direction -- this does NOT
+            # automatically flip to RTL just because Arabic is active
+            # elsewhere, since it's a fixed alignment command, not something
+            # that inherits paragraph direction. Confirmed by testing: real
+            # compiled output showed section/subsection headings remaining
+            # left-aligned even though surrounding body text correctly
+            # rendered RTL. titlesec lets us override just the heading
+            # formatting to right-align (\raggedleft) instead, matching
+            # Arabic reading convention.
+            # NOTE: this replaces ACL's own heading font size/spacing with
+            # the approximation below -- it has not been visually verified
+            # against ACL's exact original heading style and should be
+            # checked against a compiled PDF; adjust the font sizes
+            # (\large, \normalsize) below if they don't match closely enough.
+            "\\usepackage{titlesec}\n"
+            "\\titleformat{\\section}{\\normalfont\\large\\bfseries\\raggedleft}{\\thesection}{1em}{}\n"
+            "\\titleformat{\\subsection}{\\normalfont\\normalsize\\bfseries\\raggedleft}{\\thesubsection}{1em}{}\n"
+            "\\titleformat{\\subsubsection}{\\normalfont\\normalsize\\bfseries\\raggedleft}{\\thesubsubsection}{1em}{}\n"
             "\\usepackage{polyglossia}\n"
             "\\setmainlanguage[numerals=maghrib]{arabic}\n"
             "\\setotherlanguage{english}\n"
@@ -667,7 +699,6 @@ def add_arabic_package(latex_code):
                 + arabic_packages
                 + latex_code[position:]
             )
-        latex_code = fix_figure_direction_for_arabic(latex_code)
     return latex_code
 
 def find_main_tex_file(dir): 
