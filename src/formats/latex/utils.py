@@ -591,17 +591,300 @@ def fix_figure_direction_for_arabic(latex_code):
         return "\\beginL\n" + match.group(0) + "\n\\endL"
 
     return pattern.sub(wrap, latex_code)
+#Detect the LaTeX template so template-specific fixes are applied safely(Updated by Imaan Alkhanen)
+def detect_latex_template(latex_code: str) -> str:
+    """
+    Detect the LaTeX front-matter/template style.
 
+    Returns:
+        acmart
+        authblk
+        arxiv
+        acl
+        generic
+    """
+
+    if re.search(
+        r"\\documentclass(?:\[[^\]]*\])?\{acmart\}",
+        latex_code
+    ):
+        return "acmart"
+
+    if re.search(
+        r"\\usepackage(?:\[[^\]]*\])?\{authblk\}",
+        latex_code
+    ):
+        return "authblk"
+
+    if re.search(
+        r"\\usepackage(?:\[[^\]]*\])?\{arxiv\}",
+        latex_code
+    ):
+        return "arxiv"
+
+    if (
+        re.search(
+            r"\\usepackage(?:\[[^\]]*\])?\{acl[^}]*\}",
+            latex_code,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r"\\documentclass(?:\[[^\]]*\])?\{acl[^}]*\}",
+            latex_code,
+            flags=re.IGNORECASE,
+        )
+    ):
+        return "acl"
+
+    return "generic"
+#Preserve author structure and apply direction handling without breaking acmart metadata(Updated by Imaan Alkhanen)
+def fix_author_direction_for_arabic(latex_code: str) -> str:
+    """
+    Fix author blocks for Arabic documents.
+
+    - Remove blank lines inside \\author{...}.
+    - For acmart: do NOT add \\LR inside \\author.
+    - For other classes: wrap English author lines with \\LR{...}.
+    - Preserve \\And and \\AND exactly as they appear.
+    - Preserve author order and layout commands.
+    """
+
+    # acmart handles author metadata internally.
+    # Putting \LR inside \author breaks its processing.
+    is_acmart = bool(
+        re.search(
+            r"\\documentclass(?:\[[^\]]*\])?\{acmart\}",
+            latex_code
+        )
+    )
+
+    def find_matching_brace(text, open_pos):
+        depth = 0
+
+        for i in range(open_pos, len(text)):
+            if text[i] == "{" and (i == 0 or text[i - 1] != "\\"):
+                depth += 1
+            elif text[i] == "}" and (i == 0 or text[i - 1] != "\\"):
+                depth -= 1
+                if depth == 0:
+                    return i
+
+        return None
+
+    def clean_author_content(content):
+        cleaned_lines = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+
+            # Remove blank lines only
+            if not stripped:
+                continue
+
+            # Preserve author separators exactly
+            if stripped in (r"\And", r"\AND"):
+                cleaned_lines.append(stripped)
+                continue
+
+            # IMPORTANT:
+            # Never insert \LR inside acmart \author blocks.
+            if not is_acmart and re.search(r"[A-Za-z]", stripped):
+                if not stripped.startswith(r"\LR{"):
+
+                    # Keep LaTeX line break outside \LR{...}
+                    if stripped.endswith(r"\\"):
+                        text = stripped[:-2].rstrip()
+                        stripped = r"\LR{" + text + r"}\\"
+                    else:
+                        stripped = r"\LR{" + stripped + "}"
+
+            cleaned_lines.append(stripped)
+
+        return "\n".join(cleaned_lines)
+
+    result = []
+    pos = 0
+
+    # Supports:
+    # \author{...}
+    # \author[...]{...}
+    author_pattern = re.compile(
+        r"\\author(?:\s*\[[^\]]*\])?\s*\{"
+    )
+
+    while True:
+        match = author_pattern.search(latex_code, pos)
+
+        if not match:
+            result.append(latex_code[pos:])
+            break
+
+        open_brace = match.end() - 1
+        close_brace = find_matching_brace(latex_code, open_brace)
+
+        if close_brace is None:
+            # Leave malformed block unchanged
+            result.append(latex_code[pos:])
+            break
+
+        result.append(latex_code[pos:open_brace + 1])
+
+        content = latex_code[open_brace + 1:close_brace]
+        cleaned = clean_author_content(content)
+
+        if cleaned:
+            result.append("\n" + cleaned + "\n")
+
+        result.append("}")
+        pos = close_brace + 1
+
+    return "".join(result)
+# Translate the abstract heading while preserving class-specific front-matter behavior(Updated by Imaan Alkhanen)
+def fix_abstract_heading_for_arabic(latex_code: str) -> str:
+    """
+    Translate the abstract heading while preserving template-specific
+    front-matter behavior.
+    """
+
+    template = detect_latex_template(latex_code)
+
+    # acmart collects the abstract internally.
+    # Redefining the abstract environment breaks its front matter.
+    if template == "acmart":
+        return latex_code
+
+    abstract_patch = (
+        "\\renewenvironment{abstract}\n"
+        "{\\begin{center}\\bfseries ملخص\\end{center}\\quotation}\n"
+        "{\\endquotation}\n"
+    )
+
+    begin_document = re.search(
+        r"\\begin\s*\{\s*document\s*\}",
+        latex_code
+    )
+
+    if begin_document:
+        position = begin_document.start()
+
+        latex_code = (
+            latex_code[:position]
+            + abstract_patch
+            + "\n"
+            + latex_code[position:]
+        )
+
+    return latex_code
+def fix_acmart_frontmatter_for_arabic(latex_code: str) -> str:
+    """
+    Restore acmart abstract and keywords when the bidi/hyperref
+    maketitle path omits them.
+
+    This fix is applied only to acmart documents.
+    """
+
+    if detect_latex_template(latex_code) != "acmart":
+        return latex_code
+
+    # Avoid applying the patch more than once.
+    if "ArabicLatexTransKeywords" in latex_code:
+        return latex_code
+
+    maketitle_match = re.search(
+        r"\\maketitle\b",
+        latex_code
+    )
+
+    if not maketitle_match:
+        return latex_code
+
+    # Save keywords BEFORE \maketitle, because acmart may clear
+    # \@keywords while processing the title.
+    before_patch = (
+        "\n"
+        "% ArabicLatexTrans: preserve ACM front matter\n"
+        "\\makeatletter\n"
+        "\\let\\ArabicLatexTransKeywords\\@keywords\n"
+        "\\makeatother\n"
+    )
+
+    position = maketitle_match.start()
+
+    latex_code = (
+        latex_code[:position]
+        + before_patch
+        + latex_code[position:]
+    )
+
+    # Find maketitle again because the previous insertion changed offsets.
+    maketitle_match = re.search(
+        r"\\maketitle\b",
+        latex_code
+    )
+
+    if not maketitle_match:
+        return latex_code
+
+    after_patch = (
+        "\n"
+        "% ArabicLatexTrans: restore ACM abstract and keywords\n"
+        "\\makeatletter\n"
+        "\\@mkabstract\n"
+        "\\begingroup\n"
+        "  \\@specialsection{الكلمات المفتاحية}%\n"
+        "  \\noindent\\ArabicLatexTransKeywords\\par\n"
+        "\\endgroup\n"
+        "\\makeatother\n"
+    )
+
+    position = maketitle_match.end()
+
+    latex_code = (
+        latex_code[:position]
+        + after_patch
+        + latex_code[position:]
+    )
+
+    return latex_code
+def fix_pdfoutput_for_xelatex(latex_code: str) -> str:
+    """
+    Disable pdfLaTeX-specific \\pdfoutput=1 for XeLaTeX/LuaLaTeX.
+    """
+    return re.sub(
+        r'(?m)^\s*\\pdfoutput\s*=\s*1\s*$',
+        r'% \\pdfoutput=1  % disabled for XeLaTeX/LuaLaTeX',
+        latex_code,
+    )
 
 def add_arabic_package(latex_code):
     if "\\usepackage{polyglossia}" not in latex_code and "\\usepackage{babel}" not in latex_code:
+        has_authblk = bool(
+            re.search(
+                r"\\usepackage(?:\[[^\]]*\])?\{authblk\}",
+                latex_code
+            )
+        )
+
+        authblk_patch = ""
+
         arabic_packages = (
             "\\usepackage{multicol}\n"
             "\\usepackage{fontspec}\n"
+             "\\usepackage{titlesec}\n"
+             "\\titleformat{\\section}{\\normalfont\\large\\bfseries\\raggedleft}{\\thesection}{1em}{}\n"
+             "\\titleformat{\\subsection}{\\normalfont\\large\\bfseries\\raggedleft}{\\thesubsection}{1em}{}\n"
+             "\\titleformat{\\subsubsection}{\\normalfont\\large\\bfseries\\raggedleft}{\\thesubsubsection}{1em}{}\n"
+
+            "\\let\\ArabicLatexTransOriginalAuthor\\author\n"
+
             "\\usepackage{polyglossia}\n"
             "\\setmainlanguage[numerals=maghrib]{arabic}\n"
             "\\setotherlanguage{english}\n"
             "\\newfontfamily\\arabicfont[Script=Arabic,Renderer=HarfBuzz]{Amiri}\n"
+            "\\newfontfamily\\arabicfonttt[Script=Arabic]{Amiri}\n"
+
+            "\\let\\author\\ArabicLatexTransOriginalAuthor\n"
+            
             "\\let\\UseMathForPositioningText\\relax\n"
             # Relax float-placement defaults: reduces large blank gaps that can
             # appear when LaTeX defers a large figure* float (spanning both
@@ -635,22 +918,31 @@ def add_arabic_package(latex_code):
             # floats, which \topfraction/\bottomfraction/\totalnumber alone do
             # not fully control. This is the standard fix for large blank
             # areas following a figure*/table* in twocolumn documents.
-            "\\usepackage{stfloats}\n"
+            #"\\usepackage{stfloats}\n"
+            
         )
         documentclass_pattern = get_command_pattern("documentclass")
         match = documentclass_pattern.search(latex_code)
         begin_doc_match = re.search(r"\\begin\{document\}", latex_code)
-        if begin_doc_match:
-            # IMPORTANT: insert right before \begin{document}, NOT right after
-            # \documentclass. bidi (loaded internally by polyglossia for
-            # Arabic) requires essentially every other package to load before
-            # it -- inserting here, after acl.sty and everything it pulls in
-            # (times, hyperref, xcolor, natbib, etc.), avoids the wall of
-            # "you have loaded package X after bidi package" errors and the
-            # "current latin font Amiri(0) does not contain the Arabic
-            # script" errors this exact ordering mistake produces (confirmed
-            # by testing on a real compile log).
+
+        frontmatter_match = re.search(
+            r"(?m)^\s*\\(?:title|author|date)\s*(?:\[[^\]]*\])?\s*\{",
+            latex_code
+        )
+
+        if frontmatter_match:
+            position = frontmatter_match.start()
+
+            latex_code = (
+                latex_code[:position]
+                + arabic_packages
+                + "\n"
+                + latex_code[position:]
+            )
+
+        elif begin_doc_match:
             position = begin_doc_match.start()
+
             latex_code = (
                 latex_code[:position]
                 + arabic_packages
@@ -667,7 +959,11 @@ def add_arabic_package(latex_code):
                 + arabic_packages
                 + latex_code[position:]
             )
+        latex_code = fix_pdfoutput_for_xelatex(latex_code)
         latex_code = fix_figure_direction_for_arabic(latex_code)
+        latex_code = fix_author_direction_for_arabic(latex_code)
+        latex_code = fix_abstract_heading_for_arabic(latex_code)
+        latex_code = fix_acmart_frontmatter_for_arabic(latex_code)
     return latex_code
 
 def find_main_tex_file(dir): 
