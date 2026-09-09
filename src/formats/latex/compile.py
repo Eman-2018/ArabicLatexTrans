@@ -1,3 +1,4 @@
+import shutil
 from typing import List, Dict, Any
 import re
 import os
@@ -211,63 +212,135 @@ class LaTexCompiler:
         except subprocess.CalledProcessError as e:
             print("⚠️  Somthing went wrong during compiling with pdflatex.")
 
-    def _compile_with_xelatex(self,
-                              tex_file: str, 
-                              out_dir: str, 
-                              engine: str = "xelatex"):
-        
+     #Preserve left-to-right (LTR) direction for bibliography entries (Updated by Imaan Alkhanen)
+    # while keeping the Arabic bibliography heading unchanged. (Updated by Imaan Alkhanen)
+    def _fix_bbl_direction_for_arabic(self, bbl_file: str):
+        """
+        Make bibliography entries LTR while keeping
+        the Arabic bibliography heading unchanged.
+        """
+
+        if not os.path.exists(bbl_file):
+            return
+
+        with open(bbl_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Do not apply twice
+        if r"\begin{LTR}" in content:
+            return
+
+        begin_marker = r"\begin{thebibliography}"
+        end_marker = r"\end{thebibliography}"
+
+        start = content.find(begin_marker)
+        end = content.find(end_marker)
+
+        if start == -1 or end == -1:
+            return
+
+        # Locate the end of \begin{thebibliography}{...}
+        brace_start = content.find("{", start + len(begin_marker))
+
+        if brace_start == -1:
+            return
+
+        depth = 1
+        i = brace_start + 1
+
+        while i < len(content) and depth > 0:
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+            i += 1
+
+        if depth != 0:
+            return
+
+        content = (
+            content[:i]
+            + "\n\\begin{LTR}\n"
+            + content[i:end]
+            + "\n\\end{LTR}\n"
+            + content[end:]
+        )
+
+        with open(bbl_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def _compile_with_xelatex(
+            self,
+            tex_file: str,
+            out_dir: str,
+            engine: str = "xelatex"):
+
         os.makedirs(out_dir, exist_ok=True)
-        
+        cwd = os.path.dirname(tex_file)
+
+        # Copy bibliography files to latexmk output directory
+        for file in os.listdir(cwd):
+            if file.lower().endswith(".bib"):
+                src = os.path.join(cwd, file)
+                dst = os.path.join(out_dir, file)
+                shutil.copy2(src, dst)
+
         cmd = [
             "latexmk",
-            f"-{engine}",                
-            "-interaction=nonstopmode",   # no stop on errors
-            f"-outdir={out_dir}",  
-            f"-file-line-error",       
-            f"-synctex=1",
-            f"-f",                        # force mode
+            f"-{engine}",
+            "-interaction=nonstopmode",
+            f"-outdir={out_dir}",
+            "-file-line-error",
+            "-synctex=1",
+            "-f",
             tex_file
         ]
-        cwd = os.path.dirname(tex_file)
+
         try:
-            subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
-            print("✅ Compilation successful with xelatex!")
+            # First run:
+            # latexmk creates .aux, .bbl, citations, references, etc.
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                cwd=cwd
+            )
+
         except subprocess.CalledProcessError as e:
-            print("⚠️ Something went wrong during compiling with xelatex.")
+            # With -f, latexmk may still create the PDF and .bbl
+            # even when XeLaTeX returns code 1.
+            print("⚠️ First XeLaTeX/latexmk run completed with errors.")
             print("=" * 80)
             print(e.stdout.decode(errors="ignore"))
             print("=" * 80)
             print(e.stderr.decode(errors="ignore"))
 
+        # Get .bbl filename from the .tex filename
+        #tex_name = os.path.splitext(os.path.basename(tex_file))[0]
+        #bbl_file = os.path.join(out_dir, f"{tex_name}.bbl")
 
-    def _compile_with_lualatex(self,
-                              tex_file: str, 
-                              out_dir: str, 
-                              engine: str = "lualatex"):
-        
-        os.makedirs(out_dir, exist_ok=True)
-        
-        cmd = [
-            "latexmk",
-            f"-{engine}",                
-            "-interaction=nonstopmode",   # no stop on errors
-            f"-outdir={out_dir}",  
-            f"-file-line-error",       
-            f"-synctex=1",
-            f"-f",                        # force mode
-            tex_file
-        ]
-        cwd = os.path.dirname(tex_file)
+        # Fix bibliography direction after BibTeX has generated the .bbl
+        #self._fix_bbl_direction_for_arabic(bbl_file)
+        # Fix direction in all bibliography files generated by latexmk
+        for file in os.listdir(out_dir):
+            if file.lower().endswith(".bbl"):
+                bbl_file = os.path.join(out_dir, file)
+                self._fix_bbl_direction_for_arabic(bbl_file)
+
+        # Second latexmk run:
+        # Reads the modified .bbl and regenerates the PDF
         try:
-            subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
-            print("✅ Compilation successful with lualatex!")
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                cwd=cwd
+            )
 
-            output_path = os.path.join(self.output_latex_dir, "success.txt")
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write("Compilation successful\n")
-                
+            print("✅ Compilation successful with xelatex!")
+
         except subprocess.CalledProcessError as e:
-            print(f"⚠️ Something went wrong during compiling with lualatex. \n {e}")
+            print("⚠️ Something went wrong during final compiling with xelatex.")
             print("=" * 80)
             print(e.stdout.decode(errors="ignore"))
             print("=" * 80)
